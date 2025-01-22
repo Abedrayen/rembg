@@ -49,7 +49,7 @@ def remove_background(image, mask):
         image_np = np.stack([image_np] * 3, axis=-1)  # Convert it to RGB by stacking
     
     # Smooth the mask with Gaussian blur
-    mask = cv2.GaussianBlur(normPRED(mask), (15, 15), 0)
+    mask = cv2.GaussianBlur(normPRED(mask), (5, 5), 0) #(7,7)
     
     # Expand the mask to have 3 channels
     mask_3ch = np.repeat(mask[:, :, np.newaxis], 3, axis=2)
@@ -96,20 +96,21 @@ def remove_bg():
     median_val = np.median(mask_uint8)
     lower_thresh = int(max(0, 0.66 * median_val))
     upper_thresh = int(min(255, 1.33 * median_val))
-    edges = cv2.Canny(mask_uint8, lower_thresh, upper_thresh)
+    edges = cv2.Canny(mask_uint8, 20, 100)
     
-    edges_dilated = cv2.dilate(edges, np.ones((1, 1), np.uint8), iterations=1)
-    edges_closed = cv2.morphologyEx(edges_dilated, cv2.MORPH_CLOSE, np.ones((1, 1), np.uint8), iterations=1)
+    edges_dilated = cv2.dilate(edges, np.ones((1, 1), np.uint8), iterations=2)
+    edges_closed = cv2.morphologyEx(edges_dilated, cv2.MORPH_CLOSE, np.ones((1, 1), np.uint8), iterations=2)
     edges_closed  = (edges_closed / 255.0).astype(np.float32)
     
     # Combine edges and the mask
     pred_final_resized = pred_final_resized.astype(np.float32)
     pred_final_resized = cv2.add(pred_final_resized, edges_closed )
     pred_final_resized = np.clip(pred_final_resized, 0, 1)
+    
 
     border_mask = cv2.Canny((pred_final_resized * 255).astype(np.uint8), 50, 150)
     border_mask = cv2.dilate(border_mask, np.ones((5, 5), np.uint8), iterations=1)
-    blurred_mask = cv2.GaussianBlur(pred_final_resized, (21, 21), 0)
+    blurred_mask = cv2.GaussianBlur(pred_final_resized, (5, 5), 0)  #(21,21)
     pred_final_resized = np.where(border_mask > 0, blurred_mask, pred_final_resized)
     
     alpha = np.clip(pred_final_resized, 0, 1)
