@@ -31,7 +31,7 @@ def load_model(model, model_path, device):
 isnet = load_model(model=isnet, model_path=ISNET_MODEL_PATH, device=DEVICE)
 
 MEAN = torch.tensor([0.45, 0.45, 0.45]) #(adjust this mean is the last thing before conbine another pretrained model to this one to detect perfectly the contours )
-STD = torch.tensor([0.5, 0.5, 0.5])
+STD = torch.tensor([0.5,0.5,0.5])
 resize_shape = (2048, 2048)  # Larger resize shape for better detail capture  (the last thing also )
 transforms = T.Compose([T.Resize(resize_shape), T.ToTensor(), T.Normalize(mean=MEAN, std=STD)])
 
