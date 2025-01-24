@@ -103,33 +103,36 @@ def remove_bg():
     # edges_closed  = (edges_closed / 255.0).astype(np.float32)
     
     # # Combine edges and the mask
-    # pred_final_resized = pred_final_resized.astype(np.float32)
+    pred_final_resized = pred_final_resized.astype(np.float32)
     # pred_final_resized = cv2.add(pred_final_resized, edges_closed )
     # pred_final_resized = np.clip(pred_final_resized, 0, 1)
     
      # Smooth the mask using GaussianBlur
-    blurred = cv2.GaussianBlur(pred_final_resized, (5, 5), 0)  # Kernel size can be adjusted
+    # blurred = cv2.GaussianBlur(pred_final_resized, (5, 5), 0)  # Kernel size can be adjusted
     
     # Apply Laplacian edge detection
-    laplacian_edges = cv2.Laplacian(blurred.astype(np.float32), cv2.CV_32F)  # Use float32 format
+    laplacian_edges = cv2.Laplacian(pred_final_resized, cv2.CV_32F)  # Use float32 format
     laplacian_edges = np.abs(laplacian_edges)  # Take absolute values of the Laplacian
     laplacian_edges_normalized = cv2.normalize(laplacian_edges, None, 0, 1, cv2.NORM_MINMAX)  # Normalize to [0, 1]
 
-    # Combine Laplacian edges with the mask
-    combined_mask = pred_final_resized + laplacian_edges_normalized  # Add edges to the mask
-    combined_mask = np.clip(combined_mask, 0, 1)  # Clip values to [0, 1] range
+   # Détection de la zone du cou (approche basée sur le masque)
+    height, width = pred_final_resized.shape
+    region_of_interest = pred_final_resized[int(height * 0.4):int(height * 0.6), :]  # Ajuster ces proportions pour cibler le cou
 
-    # Optional: Use GaussianBlur again to refine the mask
-    refined_mask = cv2.GaussianBlur(combined_mask, (7, 7), 0)  # Adjust kernel size for smoothness
+    # Appliquer un éclairage ou une modification localisée
+    roi_brightness = cv2.GaussianBlur(region_of_interest, (7, 7), 0)  # Doucement flouter
+    roi_brightness = cv2.addWeighted(roi_brightness, 1.5, region_of_interest, -0.5, 0)  # Ajustement d'éclairage
 
-    # Apply the refined mask to the image
-    alpha = np.clip(refined_mask, 0, 1) 
+    # Réintégrer la modification dans l'image principale
+    pred_final_resized[int(height * 0.4):int(height * 0.6), :] = roi_brightness
+
+    
     # border_mask = cv2.Canny((pred_final_resized * 255).astype(np.uint8), 50, 150)
     # border_mask = cv2.dilate(border_mask, np.ones((5, 5), np.uint8), iterations=1)
     # blurred_mask = cv2.GaussianBlur(pred_final_resized, (5, 5), 0)  #(21,21)
     # pred_final_resized = np.where(border_mask > 0, blurred_mask, pred_final_resized)
     
-    # alpha = np.clip(pred_final_resized, 0, 1)
+    alpha = np.clip(pred_final_resized, 0, 1)
     
     
     image_np = np.array(image)
