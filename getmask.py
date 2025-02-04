@@ -28,7 +28,7 @@ def load_model(model, model_path, device):
 
 isnet = load_model(model=isnet, model_path=ISNET_MODEL_PATH, device=DEVICE)
 
-MEAN = torch.tensor([0.25, 0.25, 0.25])
+MEAN = torch.tensor([0.45, 0.45, 0.45])
 STD = torch.tensor([0.5, 0.5, 0.5])
 resize_shape = (2048, 2048)
 transforms = T.Compose([T.Resize(resize_shape), T.ToTensor(), T.Normalize(mean=MEAN, std=STD)])
@@ -80,7 +80,7 @@ def remove_background(image, mask):
     background = np.zeros_like(image_np)
     final_image = np.where(mask_3ch > 0.5, foreground, background).astype(np.uint8)
     return Image.fromarray(final_image)
-
+app.config['MAX_CONTENT_LENGTH']=200*1024*1024
 @app.route('/get_mask', methods=['POST'])
 def get_mask():
     if 'image' not in request.files:
@@ -104,12 +104,66 @@ def remove_bg():
         image = Image.open(file.stream).convert("RGB")
     except Exception as e:
         return jsonify({"error": f"Invalid image: {str(e)}"}), 400
-    mask = generate_mask(image)
-    final_image = remove_background(image, mask)
-    img_io = BytesIO()
-    final_image.save(img_io, format="PNG")
-    img_io.seek(0)
-    return send_file(img_io, mimetype='image/png', as_attachment=True, download_name="background_removed.png")
+    
+      # Extract metadata and other properties from the image
+    metadata = image.info  # Get metadata (e.g., EXIF data)
+    original_size = image.size  # Save the original size of the image
+    original_extension = file.filename.split('.')[-1].lower()  # Extract the file extension
+    if original_extension == 'tif':  # Handle special cases for extensions
+        original_extension = 'TIFF'
+    elif original_extension == 'jpg':
+        original_extension = 'JPEG'
+   
+    # Apply the defined transformations to the image
+    image_trans = transforms(image).to(DEVICE)
+    with torch.no_grad():  # Disable gradient computation for efficiency
+        result = isnet(image_trans.unsqueeze(0))  # Run the model on the input image
+    
+    # Normalize and resize the predicted mask
+    pred_normalize = normPRED(result[0][0].cpu().numpy())  # Normalize the mask
+    pred_normalize_squeezed = np.squeeze(pred_normalize)  # Remove extra dimensions
+    pred_final_resized = cv2.resize(pred_normalize_squeezed, original_size, interpolation=cv2.INTER_LINEAR)  # Resize to original size
+    
+    mask_uint8 = (pred_final_resized * 255).astype(np.uint8)
 
+    # # Combine edges and the mask
+    pred_final_resized = pred_final_resized.astype(np.float32)
+  
+    # Apply Laplacian edge detection
+    laplacian_edges = cv2.Laplacian(pred_final_resized, cv2.CV_32F)  # Use float32 format
+    laplacian_edges = np.abs(laplacian_edges)  # Take absolute values of the Laplacian
+    laplacian_edges_normalized = cv2.normalize(laplacian_edges, None, 0, 1, cv2.NORM_MINMAX)  # Normalize to [0, 1]
+
+   # Détection de la zone du cou (approche basée sur le masque)
+    height, width = pred_final_resized.shape
+    region_of_interest = pred_final_resized[int(height * 0.4):int(height * 0.6), :]  # Ajuster ces proportions pour cibler le cou
+
+    # Appliquer un éclairage ou une modification localisée
+    roi_brightness = cv2.GaussianBlur(region_of_interest, (7, 7), 0)  # Doucement flouter
+    roi_brightness = cv2.addWeighted(roi_brightness, 1.5, region_of_interest, -0.5, 0)  # Ajustement d'éclairage
+
+    # Réintégrer la modification dans l'image principale
+    pred_final_resized[int(height * 0.4):int(height * 0.6), :] = roi_brightness
+    alpha = np.clip(pred_final_resized, 0, 1)
+    
+    
+    image_np = np.array(image)
+    foreground = (image_np * alpha[:, :, None]).astype(np.uint8)
+    background = np.zeros_like(image_np)
+    final_image = cv2.addWeighted(foreground, 1, background, 0, 0)
+    
+    # Save the final result into an in-memory binary stream
+    img_io = BytesIO()
+    output_image = Image.fromarray(final_image)  # Convert to PIL image
+    output_image.save(img_io, format=original_extension, **metadata)  # Save with metadata
+    img_io.seek(0)  # Reset stream position to the start
+    
+    # Return the image as a downloadable file
+    return send_file(
+        img_io,
+        mimetype=f'image/{original_extension.lower()}',  # Set MIME type based on file extension
+        as_attachment=True,  # Force download
+        download_name=f"background_removed.{original_extension.lower()}"  # Set download file name
+    )
 if __name__ == '__main__':
     app.run(debug=True)
