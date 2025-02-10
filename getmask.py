@@ -47,7 +47,7 @@ def norm_pred(predicted_map):
     ma = np.max(predicted_map)
     return (predicted_map - mi) / (ma - mi + 1e-5)
 
-def generate_mask(image, blend_weight=0.5):
+def generate_mask(image, blend_weight=0.2):
     """
     Generate a mask from the input image with edge enhancement.
     
@@ -64,23 +64,21 @@ def generate_mask(image, blend_weight=0.5):
         result = isnet(image_tensor.unsqueeze(0))
     
     pred_map = norm_pred(result[0][0].cpu().numpy())
-    # Resize prediction to the original image size
     width, height = image.size
     pred_resized = cv2.resize(np.squeeze(pred_map), (width, height), interpolation=cv2.INTER_LINEAR)
-    
-    # Compute Laplacian edges
-    laplacian_edges = cv2.Laplacian(pred_resized, cv2.CV_32F)
-    laplacian_edges = np.abs(laplacian_edges)
-    edges_normalized = cv2.normalize(laplacian_edges, None, 0, 1, cv2.NORM_MINMAX)
-    
+
+    # Compute Canny edges
+    canny_edges = cv2.Canny((pred_resized * 255).astype(np.uint8), 50, 200)
+    edges_normalized = canny_edges.astype(np.float32) / 255.0  # Normalize to [0, 1]
+
     # Blend the original prediction with the edge map
     combined_mask = cv2.addWeighted(pred_resized, 1.0, edges_normalized, blend_weight, 0)
-    
-    # Optional: refine the neck area (adjust these parameters as needed)
+
+    # Optional: refine the neck area
     h, w = combined_mask.shape
     neck_top, neck_bottom = int(h * 0.4), int(h * 0.6)
     roi = combined_mask[neck_top:neck_bottom, :]
-    roi = cv2.GaussianBlur(roi, (5, 5), 0)
+    roi = cv2.GaussianBlur(roi, (1, 1), 0)
     roi = cv2.addWeighted(roi, 1.5, roi, -0.5, 0)
     combined_mask[neck_top:neck_bottom, :] = roi
 
@@ -88,7 +86,7 @@ def generate_mask(image, blend_weight=0.5):
     combined_mask = np.clip(combined_mask, 0, 1)
     return (combined_mask * 255).astype(np.uint8)
 
-def remove_background(image, blend_weight=0.5):
+def remove_background(image, blend_weight=0.2):
     """
     Remove the background from the image using the predicted mask.
     
@@ -106,35 +104,103 @@ def remove_background(image, blend_weight=0.5):
     
     pred_map = norm_pred(result[0][0].cpu().numpy())
     pred_resized = cv2.resize(np.squeeze(pred_map), (width, height), interpolation=cv2.INTER_LINEAR)
-    
-    # Compute Laplacian edges and blend
-    laplacian_edges = cv2.Laplacian(pred_resized, cv2.CV_32F)
-    laplacian_edges = np.abs(laplacian_edges)
-    edges_normalized = cv2.normalize(laplacian_edges, None, 0, 1, cv2.NORM_MINMAX)
+
+    # Compute Canny edges and blend
+    canny_edges = cv2.Canny((pred_resized * 255).astype(np.uint8), 50, 200)
+    edges_normalized = canny_edges.astype(np.float32) / 255.0  # Normalize to [0, 1]
     combined_mask = cv2.addWeighted(pred_resized, 1.0, edges_normalized, blend_weight, 0)
-    
+
     # Refine neck area
     h, w = combined_mask.shape
-    neck_top, neck_bottom = int(h * 0.4), int(h * 0.6)
+    neck_top, neck_bottom = int(h * 0.5), int(h * 0.6)
     roi = combined_mask[neck_top:neck_bottom, :]
-    roi = cv2.GaussianBlur(roi, (3, 3), 0)
+    roi = cv2.GaussianBlur(roi, (5, 5), 0)
     roi = cv2.addWeighted(roi, 1.5, roi, -0.5, 0)
     combined_mask[neck_top:neck_bottom, :] = roi
     
     # Create alpha matte and composite with original image
     alpha = np.clip(combined_mask, 0, 1)
-    kernel1 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    alpha= cv2.erode(alpha, kernel1, iterations=10)
-    alpha = cv2.dilate(alpha, kernel2, iterations=3)
+    kernel1 = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    kernel2 = cv2.getStructuringElement(cv2.MORPH_CROSS, (7, 7))
+    alpha = cv2.erode(alpha, kernel1, iterations=7, borderType=cv2.BORDER_REFLECT)
+    alpha = cv2.dilate(alpha, kernel2, iterations=1, borderType=cv2.BORDER_REFLECT)
 
     image_np = np.array(image)
-    # If needed, you can also apply morphological operations on alpha here for smoother edges
     foreground = (image_np * alpha[:, :, None]).astype(np.uint8)
     return Image.fromarray(foreground)
 
+def generate_trimap(image, fg_threshold=0.9, bg_threshold=0.1, kernel_size=5):
+    """
+    Generate a trimap from the predicted probability mask using two thresholds.
+    
+    Parameters:
+        image (PIL.Image): Input image.
+        fg_threshold (float): Confidence threshold for definite foreground (range 0 to 1).
+                              Pixels with a normalized mask value above this are marked as foreground.
+        bg_threshold (float): Confidence threshold for definite background (range 0 to 1).
+                              Pixels with a normalized mask value below this are marked as background.
+        kernel_size (int): Size of the structuring element used for morphological erosion
+                           to refine the definite regions.
+                           
+    Returns:
+        numpy.ndarray: A trimap image with:
+                       - 255 for certain foreground,
+                       - 0 for certain background,
+                       - 128 for unknown regions.
+    """
+    # Get the predicted mask from your model (mask values are expected in 0-255)
+    mask = generate_mask(image)
+    
+    # Convert mask to a probability map in the range [0, 1]
+    mask_prob = mask.astype(np.float32) / 255.0
+
+    # Create binary maps for definite foreground and definite background
+    fg_mask = (mask_prob >= fg_threshold).astype(np.uint8) * 255  # definite foreground
+    bg_mask = (mask_prob <= bg_threshold).astype(np.uint8) * 255  # definite background
+
+    # Use morphological erosion to refine these masks and remove noise along the edges
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    fg_mask = cv2.erode(fg_mask, kernel, iterations=1)
+    bg_mask = cv2.erode(bg_mask, kernel, iterations=1)
+
+    # Initialize the trimap with the unknown value (128)
+    trimap = np.full(mask.shape, 128, dtype=np.uint8)
+    
+    # Mark the definite foreground regions with 255
+    trimap[fg_mask == 255] = 255
+    
+    # Mark the definite background regions with 0
+    trimap[bg_mask == 255] = 0
+
+    return trimap
+
+
 # Limit file upload size (e.g., 200 MB)
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
+
+# API endpoint to get the trimap
+@app.route('/get_trimap', methods=['POST'])
+def get_trimap():
+    """
+    API endpoint to generate a trimap from an uploaded image.
+    """
+    if 'image' not in request.files:
+        return jsonify({"error": "No image file in request"}), 400
+
+    file = request.files['image']
+    try:
+        image = Image.open(file.stream).convert("RGB")
+    except Exception as e:
+        return jsonify({"error": f"Invalid image: {str(e)}"}), 400
+
+    trimap = generate_trimap(image)
+    success, buffer = cv2.imencode('.png', trimap)
+    if not success:
+        return jsonify({"error": "Failed to encode trimap image."}), 500
+
+    trimap_bytes = BytesIO(buffer.tobytes())
+    return send_file(trimap_bytes, mimetype='image/png',
+                     as_attachment=True, download_name="generated_trimap.png")
 
 @app.route('/get_mask', methods=['POST'])
 def get_mask():
@@ -173,6 +239,7 @@ def handle_background_removal():
     except Exception as e:
         return jsonify({"error": f"Invalid image: {str(e)}"}), 400
 
+    
     # Preserve original metadata and format
     metadata = image.info
     extension = file.filename.split('.')[-1].lower()
@@ -189,7 +256,7 @@ def handle_background_removal():
         return jsonify({"error": f"Processing error: {str(e)}"}), 500
 
     img_buffer = BytesIO()
-    result_image.save(img_buffer, format=extension, **metadata)
+    result_image.save(img_buffer, format=extension,**metadata)
     img_buffer.seek(0)
     mimetype = f'image/{extension.lower()}'
     
